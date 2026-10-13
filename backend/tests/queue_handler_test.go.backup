@@ -1,0 +1,366 @@
+package tests
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+	"time"
+	"fmt"
+
+	"github.com/google/uuid"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
+	"taxi-connect/backend/internal/queue"
+	"taxi-connect/backend/internal/terminals"
+)
+
+// MockQueueRepositoryHandler is a mock implementation of QueueRepository for testing handlers
+type MockQueueRepositoryHandler struct {
+	mock.Mock
+}
+
+func (m *MockQueueRepositoryHandler) StoreReport(ctx context.Context, report queue.QueueReport) (uuid.UUID, error) {
+	args := m.Called(ctx, report)
+	return args.Get(0).(uuid.UUID), args.Error(1)
+}
+
+func (m *MockQueueRepositoryHandler) GetRecentReportsSince(ctx context.Context, fromID, toID uuid.UUID, cutoff time.Time) ([]queue.QueueReport, error) {
+	args := m.Called(ctx, fromID, toID, cutoff)
+	return args.Get(0).([]queue.QueueReport), args.Error(1)
+}
+
+// MockTerminalRepositoryHandler is a mock implementation of TerminalRepository for testing handlers
+type MockTerminalRepositoryHandler struct {
+	mock.Mock
+}
+
+func (m *MockTerminalRepositoryHandler) GetByID(ctx context.Context, id uuid.UUID) (*terminals.Terminal, error) {
+	args := m.Called(ctx, id)
+	if args.Get(0) == nil {
+		return nil, args.Error(1).(error)
+	}
+	return args.Get(0).(*terminals.Terminal), args.Error(1).(error)
+}
+
+func (m *MockTerminalRepositoryHandler) GetByName(ctx context.Context, name string) (*terminals.Terminal, error) {
+	panic("not implemented") // not used in our tests
+}
+
+func (m *MockTerminalRepositoryHandler) List(ctx context.Context) ([]terminals.Terminal, error) {
+	panic("not implemented")
+}
+
+func (m *MockTerminalRepositoryHandler) Update(ctx context.Context, terminal terminals.Terminal) error {
+	panic("not implemented")
+}
+
+func (m *MockTerminalRepositoryHandler) Delete(ctx context.Context, id uuid.UUID) error {
+	panic("not implemented")
+}
+
+func (m *MockTerminalRepositoryHandler) FindNearby(ctx context.Context, latitude, longitude, radiusMeters float64) ([]terminals.Terminal, error) {
+	panic("not implemented")
+}
+
+func (m *MockTerminalRepositoryHandler) Create(ctx context.Context, terminal terminals.Terminal) (uuid.UUID, error) {
+	args := m.Called(ctx, terminal)
+	if args.Get(0) == nil {
+		return uuid.UUID{}, args.Error(1).(error)
+	}
+	return args.Get(0).(uuid.UUID), args.Error(1).(error)
+}
+
+// TestStoreReportHandler tests the HTTP handler for submitting queue reports
+func TestStoreReportHandler(t *testing.T) {
+	// Setup mocks
+	mockTermRepo := new(MockTerminalRepositoryHandler)
+	mockQueueRepo := new(MockQueueRepositoryHandler)
+	service := queue.NewQueueService(mockQueueRepo, mockTermRepo)
+	handler := queue.NewQueueHandler(service)
+
+	tests := []struct {
+		name          string
+		body          []byte
+		setupFn       func()
+		expectedCode  int
+		expectedBody  map[string]interface{}
+	}{
+		{
+			name: "valid report",
+			body: []byte(fmt.Sprintf(`{
+				"from_terminal_id": "%s",
+				"to_terminal_id": "%s",
+				"reported_wait_minutes": 12,
+				"reported_queue_length": 5,
+				"reporter_notes": "Test note"
+			}`, uuid.MustParse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"), uuid.MustParse("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"))),
+			setupFn: func() {
+				fromID := uuid.MustParse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+				toID := uuid.MustParse("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
+				reportID := uuid.MustParse("12345678-1234-1234-1234-123456789012")
+				mockQueueRepo.On("StoreReport", mock.Anything, mock.AnythingOfType("queue.QueueReport")).
+					Return(reportID, nil).
+					Once()
+				mockTermRepo.On("GetByID", mock.Anything, fromID).
+					Return(&terminals.Terminal{ID: fromID, Name: "Origin"}, nil).
+					Once()
+				mockTermRepo.On("GetByID", mock.Anything, toID).
+					Return(&terminals.Terminal{ID: toID, Name: "Destination"}, nil).
+					Once()
+			},
+			expectedCode: http.StatusCreated,
+			expectedBody: map[string]interface{}{
+				"id": uuid.MustParse("12345678-1234-1234-1234-123456789012"),
+			},
+		},
+		{
+			name: "invalid JSON",
+			body: []byte(`{invalid json}`),
+			setupFn: func() {},
+			expectedCode: http.StatusBadRequest,
+		},
+		{
+			name: "missing from terminal",
+			body: []byte(`{
+				"to_terminal_id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+				"reported_wait_minutes": 10
+			}`),
+			setupFn: func() {},
+			expectedCode: http.StatusBadRequest,
+		},
+		{
+			name: "invalid UUID format",
+			body: []byte(`{
+				"from_terminal_id": "not-a-uuid",
+				"to_terminal_id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+				"reported_wait_minutes": 10
+			}`),
+			setupFn: func() {},
+			expectedCode: http.StatusBadRequest,
+		},
+		{
+			name: "service validation error",
+			body: []byte(`{
+				"from_terminal_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+				"to_terminal_id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+				"reported_wait_minutes": -5
+			}`),
+			setupFn: func() {
+			},
+			expectedCode: http.StatusBadRequest,
+		},
+		{
+			name: "service internal error",
+			body: []byte(`{
+				"from_terminal_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+				"to_terminal_id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+				"reported_wait_minutes": 10
+			}`),
+			setupFn: func() {
+			},
+			expectedCode: http.StatusInternalServerError,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Setup
+			if tt.setupFn != nil {
+				tt.setupFn()
+			}
+
+			// Create request
+			req := httptest.NewRequest(http.MethodPost, "/queue/report", bytes.NewReader(tt.body))
+			req.Header.Set("Content-Type", "application/json")
+
+			// Create response recorder
+			w := httptest.NewRecorder()
+
+			// Execute
+			handler.StoreReportHandler(w, req)
+
+			// Verify
+			assert.Equal(t, tt.expectedCode, w.Code, tt.name)
+
+			if tt.expectedBody != nil {
+				var actualBody map[string]interface{}
+				err := json.NewDecoder(w.Body).Decode(&actualBody)
+				assert.NoError(t, err, tt.name)
+
+				// Check expected fields
+				for key, expectedValue := range tt.expectedBody {
+					assert.Equal(t, expectedValue, actualBody[key], tt.name)
+				}
+			}
+
+			// Verify mocks expectations were met
+			mockQueueRepo.AssertExpectations(t)
+			mockTermRepo.AssertExpectations(t)
+		})
+	}
+}
+
+// TestGetEstimateHandler tests the HTTP handler for getting wait time estimates
+func TestGetEstimateHandler(t *testing.T) {
+	// Setup mocks
+	mockTermRepo := new(MockTerminalRepositoryHandler)
+	mockQueueRepo := new(MockQueueRepositoryHandler)
+	service := queue.NewQueueService(mockQueueRepo, mockTermRepo)
+	handler := queue.NewQueueHandler(service)
+
+	tests := []struct {
+		name          string
+		queryParams   map[string]string
+		setupFn       func()
+		expectedCode  int
+		expectedBodyContains string // substring to look for in response
+		isJSON        bool   // whether response should be parsed as JSON
+	}{
+		{
+			name: "missing parameters",
+			queryParams: map[string]string{},
+			setupFn: func() {},
+			expectedCode: http.StatusBadRequest,
+			expectedBodyContains: "from and to terminal IDs are required",
+			isJSON: false,
+		},
+		{
+			name: "invalid from UUID",
+			queryParams: map[string]string{
+				"from": "not-a-uuid",
+				"to":   "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+			},
+			setupFn: func() {},
+			expectedCode: http.StatusBadRequest,
+			expectedBodyContains: "Invalid 'from' terminal ID format",
+			isJSON: false,
+		},
+		{
+			name: "invalid to UUID",
+			queryParams: map[string]string{
+				"from": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+				"to":   "not-a-uuid",
+			},
+			setupFn: func() {},
+			expectedCode: http.StatusBadRequest,
+			expectedBodyContains: "Invalid 'to' terminal ID format",
+			isJSON: false,
+		},
+		{
+			name: "no recent data",
+			queryParams: map[string]string{
+				"from": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+				"to":   "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+			},
+			setupFn: func() {
+				mockQueueRepo.On("GetRecentReportsSince", mock.Anything, mock.AnythingOfType("uuid.UUID"), mock.AnythingOfType("uuid.UUID"), mock.AnythingOfType("time.Time")).
+					Return([]queue.QueueReport{}, nil).
+					Once()
+			},
+			expectedCode: http.StatusOK,
+			expectedBodyContains: "no recent wait-time data available",
+			isJSON: true,
+		},
+		{
+			name: "valid estimate",
+			queryParams: map[string]string{
+				"from": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+				"to":   "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+			},
+			setupFn: func() {
+				fromID := uuid.MustParse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+				toID := uuid.MustParse("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
+				mockQueueRepo.On("GetRecentReportsSince", mock.Anything, fromID, toID, mock.AnythingOfType("time.Type")).
+					Return([]queue.QueueReport{
+						{
+							FromTerminalID: fromID,
+							ToTerminalID:   toID,
+							ReportedWaitMinutes: ptrIntHandler(12),
+							ReportedAt:       time.Now(),
+						},
+					}, nil).
+					Once()
+				mockTermRepo.On("GetByID", mock.Anything, fromID).
+					Return(&terminals.Terminal{ID: fromID, Name: "Origin"}, nil).
+					Once()
+				mockTermRepo.On("GetByID", mock.Anything, toID).
+					Return(&terminals.Terminal{ID: toID, Name: "Destination"}, nil).
+					Once()
+			},
+			expectedCode: http.StatusOK,
+			expectedBodyContains: "",
+			isJSON: true,
+		},
+		{
+			name: "service internal error",
+			queryParams: map[string]string{
+				"from": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+				"to":   "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+			},
+			setupFn: func() {
+			},
+			expectedCode: http.StatusInternalServerError,
+			isJSON: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Setup
+			if tt.setupFn != nil {
+				tt.setupFn()
+			}
+
+			// Build URL with query parameters
+			url := "/queue/estimate?"
+			for key, value := range tt.queryParams {
+				url += key + "=" + value + "&"
+			}
+			// Remove trailing &
+			if len(url) > 1 && url[len(url)-1] == '&' {
+				url = url[:len(url)-1]
+			}
+
+			// Create request
+			req := httptest.NewRequest(http.MethodGet, url, nil)
+
+			// Create response recorder
+			w := httptest.NewRecorder()
+
+			// Execute
+			handler.GetEstimateHandler(w, req)
+
+			// Verify
+			assert.Equal(t, tt.expectedCode, w.Code, tt.name)
+
+			if tt.expectedBodyContains != "" {
+				assert.Contains(t, w.Body.String(), tt.expectedBodyContains, tt.name)
+			}
+
+			if tt.isJSON && tt.expectedBodyContains == "" {
+				// Try to parse as JSON for successful estimates
+				var actualBody map[string]interface{}
+				err := json.NewDecoder(w.Body).Decode(&actualBody)
+				if err == nil {
+					// Basic validation that it's valid JSON
+					assert.NotEmpty(t, actualBody, tt.name)
+				}
+			}
+
+			// Verify mocks expectations were met
+			mockQueueRepo.AssertExpectations(t)
+			mockTermRepo.AssertExpectations(t)
+		})
+	}
+}
+
+// Helper function to create a pointer to an int
+func ptrIntHandler(v int) *int {
+	return &v
+}
+
+// Verify that MockTerminalRepositoryHandler implements the TerminalRepository interface.
+var _ terminals.TerminalRepository = (*MockTerminalRepositoryHandler)(nil)
