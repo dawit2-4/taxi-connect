@@ -48,6 +48,19 @@ type MockTerminalRepository struct {
 	mock.Mock
 }
 
+// MockUserRepository mocks the user repository.
+type MockUserRepository struct {
+	mock.Mock
+}
+
+func (m *MockUserRepository) IncrementReportCount(ctx context.Context, id uuid.UUID) error {
+	args := m.Called(ctx, id)
+	return args.Error(0)
+}
+
+// Compile-time interface check.
+var _ queue.UserRepository = (*MockUserRepository)(nil)
+
 func (m *MockTerminalRepository) GetByID(
 	ctx context.Context,
 	id uuid.UUID,
@@ -229,163 +242,173 @@ func TestServiceReportValidations(t *testing.T) {
 					Return(&terminalrepo.Terminal{ID: toID, Name: "Destination"}, nil).Once()
 				qr.On("StoreReport", mock.Anything, mock.Anything).
 					Return(fromID, nil).Once()
-			},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			tr := new(MockTerminalRepository)
-			qr := new(MockQueueRepository)
-			service := queue.NewQueueService(qr, tr)
-
-			if tt.setup != nil {
-				tt.setup(tr, qr)
-			}
-
-			id, err := service.StoreReport(ctx, tt.report)
-
-			if tt.expectedError != nil {
-				assert.ErrorIs(t, err, tt.expectedError)
-				assert.Equal(t, uuid.Nil, id)
-			} else {
-				assert.NoError(t, err)
-				assert.NotEqual(t, uuid.Nil, id)
-			}
-
-			tr.AssertExpectations(t)
-			qr.AssertExpectations(t)
-			if tt.expectedError == queue.ErrInvalidReport ||
-				tt.expectedError == queue.ErrSameTerminals {
-				tr.AssertNotCalled(t, "GetByID", mock.Anything, mock.Anything)
-				qr.AssertNotCalled(t, "StoreReport", mock.Anything, mock.Anything)
-			}
-		})
-	}
-}
-
-func TestServiceGetEstimate(t *testing.T) {
-	fromID := uuid.MustParse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
-	toID := uuid.MustParse("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
-
-	tests := []struct {
-		name          string
-		reports       []queue.QueueReport
-		expectedError error
-		expectedWait  int
-		expectedScore float32
-		expectedCount int
-	}{
-		{
-			name:          "no reports",
-			reports:       []queue.QueueReport{},
-			expectedError: queue.ErrNoRecentData,
-		},
-		{
-			name: "reports without wait times",
-			reports: []queue.QueueReport{
-				{
-					FromTerminalID:      fromID,
-					ToTerminalID:        toID,
-					ReportedQueueLength: ptrInt(5),
-					ReportedAt:          time.Now().Add(-2 * time.Minute),
+					},
+					expectedError: nil,
 				},
-			},
-			expectedError: queue.ErrNoRecentData,
-		},
-		{
-			name: "single wait time report",
-			reports: []queue.QueueReport{
-				{
-					FromTerminalID:      fromID,
-					ToTerminalID:        toID,
-					ReportedWaitMinutes: ptrInt(10),
-					ReportedAt:          time.Now().Add(-2 * time.Minute),
-				},
-			},
-			expectedWait:  10,
-			expectedScore: 0.2,
-			expectedCount: 1,
-		},
-		{
-			name: "multiple recent reports with recency weighting",
-			reports: []queue.QueueReport{
-				{
-					FromTerminalID:      fromID,
-					ToTerminalID:        toID,
-					ReportedWaitMinutes: ptrInt(8),
-					ReportedAt:          time.Now().Add(-1 * time.Minute),
-				},
-				{
-					FromTerminalID:      fromID,
-					ToTerminalID:        toID,
-					ReportedWaitMinutes: ptrInt(12),
-					ReportedAt:          time.Now().Add(-3 * time.Minute),
-				},
-				{
-					FromTerminalID:      fromID,
-					ToTerminalID:        toID,
-					ReportedWaitMinutes: ptrInt(15),
-					ReportedAt:          time.Now().Add(-5 * time.Minute),
-				},
-			},
-			expectedWait:  10,
-			expectedScore: 0.6,
-			expectedCount: 3,
-		},
-		{
-			name: "queue-length-only report does not affect wait estimate",
-			reports: []queue.QueueReport{
-				{
-					FromTerminalID:      fromID,
-					ToTerminalID:        toID,
-					ReportedWaitMinutes: ptrInt(14),
-					ReportedAt:          time.Now().Add(-3 * time.Minute),
-				},
-				{
-					FromTerminalID:      fromID,
-					ToTerminalID:        toID,
-					ReportedQueueLength: ptrInt(7),
-					ReportedAt:          time.Now().Add(-1 * time.Minute),
-				},
-			},
-			expectedWait:  14,
-			expectedScore: 0.2,
-			expectedCount: 1,
-		},
-	}
+		}
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				tr := new(MockTerminalRepository)
+				qr := new(MockQueueRepository)
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			qr := new(MockQueueRepository)
-			tr := new(MockTerminalRepository)
-			service := queue.NewQueueService(qr, tr)
+				// Create mock notifier for testing
+				mockConnMgr := &queue.ConnectionManager{}
+				mockNotifier := &queue.SimpleQueueNotifier{ConnMgr: mockConnMgr}
+				mockUserRepo := &MockUserRepository{}
+				service := queue.NewQueueService(qr, mockUserRepo, tr, mockNotifier)
 
-			qr.On(
-				"GetRecentReportsSince",
-				mock.Anything,
-				fromID,
-				toID,
-				mock.Anything,
-			).Return(tt.reports, nil).Once()
-
-			estimate, err := service.GetEstimate(context.Background(), fromID, toID)
-
-			if tt.expectedError != nil {
-				assert.ErrorIs(t, err, tt.expectedError)
-				assert.Nil(t, estimate)
-			} else {
-				assert.NoError(t, err)
-				if assert.NotNil(t, estimate) {
-					assert.Equal(t, fromID, estimate.FromTerminalID)
-					assert.Equal(t, toID, estimate.ToTerminalID)
-					assert.Equal(t, tt.expectedWait, estimate.CurrentWaitTime)
-					assert.InDelta(t, tt.expectedScore, estimate.ConfidenceScore, 0.01)
-					assert.Equal(t, tt.expectedCount, estimate.ReportedCount)
+				if tt.setup != nil {
+					tt.setup(tr, qr)
 				}
-			}
 
-			qr.AssertExpectations(t)
-		})
+				id, err := service.StoreReport(ctx, tt.report)
+
+				if tt.expectedError != nil {
+					assert.ErrorIs(t, err, tt.expectedError)
+					assert.Equal(t, uuid.Nil, id)
+				} else {
+					assert.NoError(t, err)
+					assert.NotEqual(t, uuid.Nil, id)
+				}
+
+				tr.AssertExpectations(t)
+				qr.AssertExpectations(t)
+				if tt.expectedError == queue.ErrInvalidReport ||
+					tt.expectedError == queue.ErrSameTerminals {
+					tr.AssertNotCalled(t, "GetByID", mock.Anything, mock.Anything)
+					qr.AssertNotCalled(t, "StoreReport", mock.Anything, mock.Anything)
+				}
+			})
+		}
 	}
-}
+
+	func TestServiceGetEstimate(t *testing.T) {
+		fromID := uuid.MustParse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+		toID := uuid.MustParse("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
+
+		tests := []struct {
+			name          string
+			reports       []queue.QueueReport
+			expectedError error
+			expectedWait  int
+			expectedScore float32
+			expectedCount int
+		}{
+			{
+				name:          "no reports",
+				reports:       []queue.QueueReport{},
+				expectedError: queue.ErrNoRecentData,
+			},
+			{
+				name: "reports without wait times",
+				reports: []queue.QueueReport{
+					{
+						FromTerminalID:      fromID,
+						ToTerminalID:        toID,
+						ReportedQueueLength: ptrInt(5),
+						ReportedAt:          time.Now().Add(-2 * time.Minute),
+					},
+				},
+				expectedError: queue.ErrNoRecentData,
+			},
+			{
+				name: "single wait time report",
+				reports: []queue.QueueReport{
+					{
+						FromTerminalID:      fromID,
+						ToTerminalID:        toID,
+						ReportedWaitMinutes: ptrInt(10),
+						ReportedAt:          time.Now().Add(-2 * time.Minute),
+					},
+				},
+				expectedWait:  10,
+				expectedScore: 0.2,
+				expectedCount: 1,
+			},
+			{
+				name: "multiple recent reports with recency weighting",
+				reports: []queue.QueueReport{
+					{
+						FromTerminalID:      fromID,
+						ToTerminalID:        toID,
+						ReportedWaitMinutes: ptrInt(8),
+						ReportedAt:          time.Now().Add(-1 * time.Minute),
+					},
+					{
+						FromTerminalID:      fromID,
+						ToTerminalID:        toID,
+						ReportedWaitMinutes: ptrInt(12),
+						ReportedAt:          time.Now().Add(-3 * time.Minute),
+					},
+					{
+						FromTerminalID:      fromID,
+						ToTerminalID:        toID,
+						ReportedWaitMinutes: ptrInt(15),
+						ReportedAt:          time.Now().Add(-5 * time.Minute),
+					},
+				},
+				expectedWait:  10,
+				expectedScore: 0.6,
+				expectedCount: 3,
+			},
+			{
+				name: "queue-length-only report does not affect wait estimate",
+				reports: []queue.QueueReport{
+					{
+						FromTerminalID:      fromID,
+						ToTerminalID:        toID,
+						ReportedWaitMinutes: ptrInt(14),
+						ReportedAt:          time.Now().Add(-3 * time.Minute),
+					},
+					{
+						FromTerminalID:      fromID,
+						ToTerminalID:        toID,
+						ReportedQueueLength: ptrInt(7),
+						ReportedAt:          time.Now().Add(-1 * time.Minute),
+					},
+				},
+				expectedWait:  14,
+				expectedScore: 0.2,
+				expectedCount: 1,
+			},
+		}
+
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				qr := new(MockQueueRepository)
+				tr := new(MockTerminalRepository)
+
+				// Create mock notifier for testing
+				mockConnMgr := &queue.ConnectionManager{}
+				mockNotifier := &queue.SimpleQueueNotifier{ConnMgr: mockConnMgr}
+				mockUserRepo := &MockUserRepository{}
+				service := queue.NewQueueService(qr, mockUserRepo, tr, mockNotifier)
+
+				qr.On(
+					"GetRecentReportsSince",
+					mock.Anything,
+					fromID,
+					toID,
+					mock.Anything,
+				).Return(tt.reports, nil).Once()
+
+				estimate, err := service.GetEstimate(context.Background(), fromID, toID)
+
+				if tt.expectedError != nil {
+					assert.ErrorIs(t, err, tt.expectedError)
+					assert.Nil(t, estimate)
+				} else {
+					assert.NoError(t, err)
+					if assert.NotNil(t, estimate) {
+						assert.Equal(t, fromID, estimate.FromTerminalID)
+						assert.Equal(t, toID, estimate.ToTerminalID)
+						assert.Equal(t, tt.expectedWait, estimate.CurrentWaitTime)
+						assert.InDelta(t, tt.expectedScore, estimate.ConfidenceScore, 0.01)
+						assert.Equal(t, tt.expectedCount, estimate.ReportedCount)
+					}
+				}
+
+				qr.AssertExpectations(t)
+			})
+		}
+	}

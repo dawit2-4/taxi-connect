@@ -12,15 +12,27 @@ import (
 	"github.com/google/uuid"
 )
 
+// UserRepository defines the interface for user data access.
+// This is defined here to avoid import cycles with the user package.
+type UserRepository interface {
+	IncrementReportCount(ctx context.Context, id uuid.UUID) error
+}
+
 // QueueService provides business logic for queue operations
 type QueueService struct {
 	repo     QueueRepository
+	userRepo UserRepository
 	termRepo terminalrepo.TerminalRepository
+	notifier QueueNotifier
+}
+
+type QueueNotifier interface {
+	NotifyQueueUpdate(fromID, toID uuid.UUID)
 }
 
 // NewQueueService creates a new QueueService with the given repositories
-func NewQueueService(repo QueueRepository, termRepo terminalrepo.TerminalRepository) *QueueService {
-	return &QueueService{repo: repo, termRepo: termRepo}
+func NewQueueService(repo QueueRepository, userRepo UserRepository, termRepo terminalrepo.TerminalRepository, notifier QueueNotifier) *QueueService {
+	return &QueueService{repo: repo, userRepo: userRepo, termRepo: termRepo, notifier: notifier}
 }
 
 // Custom error types for the service layer
@@ -31,14 +43,28 @@ var (
 	ErrTerminalNotFound = errors.New("terminal not found")
 )
 
+func (s *QueueService) notifyQueueUpdate(fromID, toID uuid.UUID) {
+	if s.notifier != nil {
+		s.notifier.NotifyQueueUpdate(fromID, toID)
+	}
+}
+
 // StoreReport validates and stores a user's queue observation
 // Implements MVP decision #1: Validate terminals exist, require at least one of wait time/queue length,
 // store both if provided, reject negative values and identical terminals
+// Associates report with authenticated user if available in context
 
 func (s *QueueService) StoreReport(
 	ctx context.Context,
 	report QueueReport,
 ) (uuid.UUID, error) {
+	// Extract user ID from context if available (set by JWT middleware)
+	if userIDVal := ctx.Value("userID"); userIDVal != nil {
+		if userID, ok := userIDVal.(uuid.UUID); ok {
+			report.UserID = &userID
+		}
+	}
+
 	// Validate required terminal IDs.
 	if report.FromTerminalID == uuid.Nil || report.ToTerminalID == uuid.Nil {
 		return uuid.Nil, ErrInvalidReport
@@ -97,7 +123,25 @@ func (s *QueueService) StoreReport(
 	}
 
 	// Store the report only after validation succeeds.
-	return s.repo.StoreReport(ctx, report)
+	id, err := s.repo.StoreReport(ctx, report)
+	if err != nil {
+		return uuid.Nil, err
+	}
+
+	// Increment the user's report count if user ID is available
+	if report.UserID != nil {
+		if err := s.userRepo.IncrementReportCount(ctx, *report.UserID); err != nil {
+			// Log error but don't fail the request - report was still stored successfully
+			// In production, you might want to use a proper logger
+			fmt.Printf("Warning: failed to increment report count for user %s: %v\n", report.UserID.String(), err)
+		}
+	}
+
+	// 👇 WEBSOCKET NOTIFICATION: Notify subscribers of updated data
+	// This is the ONLY change needed for WebSocket integration
+	s.notifyQueueUpdate(report.FromTerminalID, report.ToTerminalID)
+
+	return id, nil
 }
 
 // GetEstimate calculates wait time estimate for a route

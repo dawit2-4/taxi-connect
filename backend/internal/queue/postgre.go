@@ -33,10 +33,10 @@ func NewPostgresQueueRepository(db *sql.DB) QueueRepository {
 func (r *postgresQueueRepository) StoreReport(ctx context.Context, report QueueReport) (uuid.UUID, error) {
 	var id uuid.UUID
 	err := r.db.QueryRowContext(ctx,
-		`INSERT INTO queue_reports (from_terminal_id, to_terminal_id, reported_wait_minutes, reported_queue_length, reporter_notes, reported_at)
-		 VALUES ($1, $2, $3, $4, $5, $6)
+		`INSERT INTO queue_reports (from_terminal_id, to_terminal_id, user_id, reported_wait_minutes, reported_queue_length, reporter_notes, reported_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7)
 		 RETURNING id`,
-		report.FromTerminalID, report.ToTerminalID, report.ReportedWaitMinutes, report.ReportedQueueLength, report.ReporterNotes, report.ReportedAt,
+		report.FromTerminalID, report.ToTerminalID, report.UserID, report.ReportedWaitMinutes, report.ReportedQueueLength, report.ReporterNotes, report.ReportedAt,
 	).Scan(&id)
 
 	if err != nil {
@@ -55,7 +55,7 @@ func (r *postgresQueueRepository) StoreReport(ctx context.Context, report QueueR
 // that occurred after the given cutoff time.
 func (r *postgresQueueRepository) GetRecentReportsSince(ctx context.Context, fromID, toID uuid.UUID, cutoff time.Time) ([]QueueReport, error) {
 	rows, err := r.db.QueryContext(ctx,
-		`SELECT id, from_terminal_id, to_terminal_id, reported_wait_minutes, reported_queue_length, reporter_notes, reported_at
+		`SELECT id, from_terminal_id, to_terminal_id, user_id, reported_wait_minutes, reported_queue_length, reporter_notes, reported_at
 		 FROM queue_reports
 		 WHERE from_terminal_id = $1 AND to_terminal_id = $2 AND reported_at >= $3
 		 ORDER BY reported_at DESC`,
@@ -69,7 +69,7 @@ func (r *postgresQueueRepository) GetRecentReportsSince(ctx context.Context, fro
 	var reports []QueueReport
 	for rows.Next() {
 		var report QueueReport
-		if err := rows.Scan(&report.ID, &report.FromTerminalID, &report.ToTerminalID, &report.ReportedWaitMinutes, &report.ReportedQueueLength, &report.ReporterNotes, &report.ReportedAt); err != nil {
+		if err := rows.Scan(&report.ID, &report.FromTerminalID, &report.ToTerminalID, &report.UserID, &report.ReportedWaitMinutes, &report.ReportedQueueLength, &report.ReporterNotes, &report.ReportedAt); err != nil {
 			return nil, fmt.Errorf("failed to scan queue report: %w", err)
 		}
 		reports = append(reports, report)

@@ -57,6 +57,19 @@ type MockTerminalRepositoryHandler struct {
 	mock.Mock
 }
 
+// MockUserRepositoryHandler mocks the user repository.
+type MockUserRepositoryHandler struct {
+	mock.Mock
+}
+
+func (m *MockUserRepositoryHandler) IncrementReportCount(ctx context.Context, id uuid.UUID) error {
+	args := m.Called(ctx, id)
+	return args.Error(0)
+}
+
+// Compile-time interface check.
+var _ queue.UserRepository = (*MockUserRepositoryHandler)(nil)
+
 func (m *MockTerminalRepositoryHandler) GetByID(
 	ctx context.Context,
 	id uuid.UUID,
@@ -213,8 +226,12 @@ func TestStoreReportHandler(t *testing.T) {
 			mockQueueRepo := new(MockQueueRepositoryHandler)
 			mockTermRepo := new(MockTerminalRepositoryHandler)
 
-			service := queue.NewQueueService(mockQueueRepo, mockTermRepo)
-			handler := queue.NewQueueHandler(service)
+			// Create mock notifier and connection manager for testing
+			mockConnMgr := &queue.ConnectionManager{}
+			mockNotifier := &queue.SimpleQueueNotifier{ConnMgr: mockConnMgr}
+			mockUserRepo := &MockUserRepositoryHandler{}
+			service := queue.NewQueueService(mockQueueRepo, mockUserRepo, mockTermRepo, mockNotifier)
+			handler := queue.NewQueueHandler(service, mockConnMgr)
 
 			if tt.setupFn != nil {
 				tt.setupFn(mockQueueRepo, mockTermRepo)

@@ -2,21 +2,98 @@ package queue
 
 import (
 	"encoding/json"
-	"net/http"
 	"errors"
+	"net/http"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/gorilla/websocket"
 )
+
+
+var upgrader = websocket.Upgrader {
+	ReadBufferSize: 1024,
+	WriteBufferSize: 1024,
+	CheckOrigin: func(r *http.Request) bool {return true},
+}
 
 // QueueHandler handles HTTP requests for queue operations
 type QueueHandler struct {
 	service *QueueService
+	connectionManager *ConnectionManager
 }
 
 // NewQueueHandler creates a new QueueHandler with the given service
-func NewQueueHandler(service *QueueService) *QueueHandler {
-	return &QueueHandler{service: service}
+func NewQueueHandler(service *QueueService, connectionManager *ConnectionManager) *QueueHandler {
+	return &QueueHandler{
+		service: service,
+		connectionManager: connectionManager,
+	}
+}
+
+func (h *QueueHandler) QueueWebSocketHandler(w http.ResponseWriter, r *http.Request) {
+	fromIDStr := r.URL.Query().Get("from")
+	toIDStr := r.URL.Query().Get("to")
+
+	if fromIDStr == "" || toIDStr == "" {
+		http.Error(w, "from and to terminal IDs are required", http.StatusBadRequest)
+		return
+	}
+
+	fromID, err := uuid.Parse(fromIDStr)
+	if err != nil {
+		http.Error(w, "Invalid 'from' terminal ID format", http.StatusBadRequest)
+		return
+	}
+
+	toID, err := uuid.Parse(toIDStr)
+	if err != nil {
+		http.Error(w, "Invalid 'to' terminal ID format", http.StatusBadRequest)
+		return
+	}
+
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		return
+	}
+
+	routeKey := fromID.String()+":"+toID.String()
+
+	h.connectionManager.AddSubscriber(routeKey, conn)
+
+	defer h.connectionManager.RemoveSubscribers(routeKey, conn)
+
+	estimate, err := h.service.GetEstimate(r.Context(), fromID, toID)
+	if err != nil {
+		// If we can't get the initial estimate, still keep connection alive for updates
+		// In production, you might want to send an error message or close the connection
+	} else {
+		// Send initial estimate
+		initialMsg := map[string]interface{}{
+			"type":           "estimate",
+			"from_terminal":  fromID.String(),
+			"to_terminal":    toID.String(),
+			"estimate":       estimate,
+			"timestamp":      time.Now().Unix(),
+		}
+		if err := conn.WriteJSON(initialMsg); err != nil {
+			// If we can't write the initial message, connection is likely broken
+			return
+		}
+	}
+
+	// Keep connection alive to receive updates
+	// In production, enhance this loop with ping/pong handling and proper timeout enforcement
+	for {
+		_, _, err := conn.ReadMessage()
+		if err != nil {
+			// Client disconnected or error occurred
+			break
+		}
+		// Optional: Handle pings or client messages here
+		time.Sleep(1 * time.Second) // Prevent busy loop
+	}
+	
 }
 
 // StoreReportHandler handles POST /queue/report
