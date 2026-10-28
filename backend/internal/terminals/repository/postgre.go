@@ -209,8 +209,7 @@ func (r *postgresTerminalRepository) Delete(ctx context.Context, id uuid.UUID) e
 
 // FindNearby returns terminals within a specified distance (meters) of a point
 // Uses ST_DWithin for efficient radius-based search
-func (r *postgresTerminalRepository) FindNearby(ctx context.Context, latitude, longitude, radiusMeters float64) ([]terminaldomain.Terminal, error) {
-	// Validate inputs before hitting the database
+func (r *postgresTerminalRepository) FindNearby(ctx context.Context, latitude, longitude, radiusMeters float64) ([]terminaldomain.Terminal, error) {	// Validate inputs before hitting the database
 	if radiusMeters <= 0 {
 		return nil, ErrInvalidRadius
 	}
@@ -250,6 +249,33 @@ func (r *postgresTerminalRepository) FindNearby(ctx context.Context, latitude, l
 	}
 
 	return terminals, nil
+}
+
+// GetRouteEdges returns all directed route edges between terminals.
+func (r *postgresTerminalRepository) GetRouteEdges(ctx context.Context) ([]terminaldomain.RouteEdge, error) {
+	rows, err := r.db.QueryContext(ctx,
+		`SELECT id, from_terminal_id, to_terminal_id, travel_time_minutes, created_at, updated_at
+		 FROM route_edges
+		 ORDER BY from_terminal_id, to_terminal_id`)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get route edges: %w", err)
+	}
+	defer rows.Close()
+
+	var edges []terminaldomain.RouteEdge
+	for rows.Next() {
+		var e terminaldomain.RouteEdge
+		if err := rows.Scan(&e.ID, &e.FromTerminalID, &e.ToTerminalID, &e.TravelTimeMinutes, &e.CreatedAt, &e.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("failed to scan route edge: %w", err)
+		}
+		edges = append(edges, e)
+	}
+
+	if err = rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating route edges: %w", err)
+	}
+
+	return edges, nil
 }
 
 // Helper function to check for PostgreSQL unique violation errors (SQLSTATE 23505)

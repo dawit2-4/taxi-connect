@@ -14,4 +14,5 @@ type TerminalRepository interface {
 	Update(ctx context.Context, terminal Terminal) error
 	Delete(ctx context.Context, id uuid.UUID) error
 	FindNearby(ctx context.Context, lat, lon, radiusMeters float64) ([]Terminal, error)
+	GetRouteEdges(ctx context.Context) ([]RouteEdge, error)
 }

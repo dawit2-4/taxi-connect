@@ -17,8 +17,8 @@ import (
 	terminalrepo "taxi-connect/backend/internal/terminals/repository"
 	userRepo "taxi-connect/backend/internal/user"
 
-	_ "github.com/jackc/pgx/v5/stdlib" // Register pgx driver with database/sql
 	"github.com/google/uuid"
+	_ "github.com/jackc/pgx/v5/stdlib" // Register pgx driver with database/sql
 )
 
 // userRepositoryAdapter adapts the user package's UserRepository to the auth package's UserRepository interface.
@@ -56,7 +56,6 @@ func main() {
 	// Initialize terminal repository, service, and handler
 	terminalRepo := terminalrepo.NewPostgresTerminalRepository(db)
 	terminalService := terminals.NewTerminalService(terminalRepo)
-	terminalHandler := terminals.NewTerminalHandler(terminalService)
 
 	// Initialize queue repository
 	queueRepo := queuerepo.NewPostgresQueueRepository(db)
@@ -75,6 +74,18 @@ func main() {
 
 	// Initialize queue service with notifier
 	queueService := queue.NewQueueService(queueRepo, userRepoInstance, terminalRepo, notifier)
+
+	// Callback that enriches route alternatives with live queue wait-time estimates.
+	// Uses context.Background() since the QueueEstimateFunc signature carries no request context.
+	getQueueEstimate := func(from, to uuid.UUID) (int, float32, error) {
+		estimate, err := queueService.GetEstimate(context.Background(), from, to)
+		if err != nil {
+			return 0, 0, err
+		}
+		return estimate.CurrentWaitTime, estimate.ConfidenceScore, nil
+	}
+
+	terminalHandler := terminals.NewTerminalHandler(terminalService, getQueueEstimate)
 	queueHandler := queue.NewQueueHandler(queueService, connectionManager)
 
 	// Load JWT secret from config (in production, this should come from environment variables)
@@ -128,6 +139,15 @@ func main() {
 		}
 	})
 
+	// Route alternatives routes
+	mux.HandleFunc("/routes/alternatives", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			terminalHandler.FindAlternativeRoutesHandler(w, r)
+		} else {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
+
 	// Queue routes
 	var userAuthRepo auth.UserRepository = &userRepositoryAdapter{userRepoInstance}
 	jwtMiddleware := auth.JWTMiddleware(userAuthRepo, jwtSecret)
@@ -168,9 +188,11 @@ func main() {
 // runMigrations executes all SQL migration files in order
 func runMigrations(db *sql.DB) error {
 	files := []string{
-		"migrations/001_create_extensions.sql",
-		"migrations/002_create_tables.sql",
-		"migrations/003_create_queue_table.sql",
+		// "migrations/001_create_extensions.sql",
+		// "migrations/002_create_tables.sql",
+		// "migrations/003_create_queue_table.sql",
+		"migrations/004_create_users.sql",
+		"migrations/005_seed_terminals_and_routes.sql",
 	}
 
 	for _, file := range files {

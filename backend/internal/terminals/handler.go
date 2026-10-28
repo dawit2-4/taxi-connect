@@ -12,12 +12,14 @@ import (
 
 // TerminalHandler handles HTTP requests for terminals
 type TerminalHandler struct {
-	service *TerminalService
+	service      *TerminalService
+	queueEstimate QueueEstimateFunc
 }
 
-// NewTerminalHandler creates a new TerminalHandler with the given service
-func NewTerminalHandler(service *TerminalService) *TerminalHandler {
-	return &TerminalHandler{service: service}
+// NewTerminalHandler creates a new TerminalHandler with the given service and optional
+// queue estimate callback for enriching route alternatives with live wait-time data.
+func NewTerminalHandler(service *TerminalService, queueEstimate QueueEstimateFunc) *TerminalHandler {
+	return &TerminalHandler{service: service, queueEstimate: queueEstimate}
 }
 
 // CreateTerminalHandler handles POST /terminals
@@ -247,4 +249,50 @@ func (h *TerminalHandler) FindTerminalsNearHandler(w http.ResponseWriter, r *htt
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(terminals)
+}
+
+// FindAlternativeRoutesHandler handles GET /routes/alternatives?from=&to=
+func (h *TerminalHandler) FindAlternativeRoutesHandler(w http.ResponseWriter, r *http.Request) {
+	// Parse query parameters
+	fromIDStr := r.URL.Query().Get("from")
+	toIDStr := r.URL.Query().Get("to")
+
+	if fromIDStr == "" || toIDStr == "" {
+		http.Error(w, "from and to terminal IDs are required", http.StatusBadRequest)
+		return
+	}
+
+	fromID, err := uuid.Parse(fromIDStr)
+	if err != nil {
+		http.Error(w, "Invalid 'from' terminal ID format", http.StatusBadRequest)
+		return
+	}
+
+	toID, err := uuid.Parse(toIDStr)
+	if err != nil {
+		http.Error(w, "Invalid 'to' terminal ID format", http.StatusBadRequest)
+		return
+	}
+
+	routes, err := h.service.FindAlternativeRoutes(r.Context(), fromID, toID, 3, h.queueEstimate)
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrSameTerminals):
+			http.Error(w, err.Error(), http.StatusBadRequest)
+		case errors.Is(err, ErrNoRouteFound):
+			http.Error(w, err.Error(), http.StatusNotFound)
+		case errors.Is(err, ErrTerminalNotFound):
+			http.Error(w, err.Error(), http.StatusNotFound)
+		default:
+			http.Error(w, "Internal server error: "+err.Error(), http.StatusInternalServerError)
+		}
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"from_terminal_id": fromID,
+		"to_terminal_id":   toID,
+		"alternatives":     routes,
+	})
 }

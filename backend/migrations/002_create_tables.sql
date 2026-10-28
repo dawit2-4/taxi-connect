@@ -21,3 +21,4 @@
   -- Indexes for foreign keys (optional but helpful for query performance)
   CREATE INDEX idx_route_edges_from ON route_edges(from_terminal_id);
   CREATE INDEX idx_route_edges_to ON route_edges(to_terminal_id);
+  

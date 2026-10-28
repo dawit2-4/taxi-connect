@@ -1,4 +1,5 @@
-CREATE TABLE queuereport (
+
+CREATE TABLE queue_reports (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     from_terminal_id UUID NOT NULL,
     to_terminal_id UUID NOT NULL,
@@ -7,7 +8,6 @@ CREATE TABLE queuereport (
     reporter_notes TEXT NULL,
     reported_at TIMESTAMP NOT NULL DEFAULT NOW(),
 
-    -- Foreign key constraints to ensure valid terminal references
     CONSTRAINT fk_queue_reports_from_terminal
         FOREIGN KEY (from_terminal_id)
         REFERENCES terminals(id)
@@ -19,11 +19,12 @@ CREATE TABLE queuereport (
         ON DELETE RESTRICT
 );
 
--- Indexes for efficient querying
--- Primary index for looking up recent reports by route (most common query)
 CREATE INDEX idx_queue_reports_route_on_queue_reports
-    ON queue_reports(from_terminal_id, to_terminal_id, reported_at DESC);
+    ON queue_reports(
+        from_terminal_id,
+        to_terminal_id,
+        reported_at DESC
+    );
 
--- Index for finding stale reports (for cleanup procedures)
 CREATE INDEX idx_queue_reports_reported_at_on_queue_reports
     ON queue_reports(reported_at);
